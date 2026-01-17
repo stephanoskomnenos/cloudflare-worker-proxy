@@ -222,7 +222,7 @@ function getRealCurrentUrl() {
 	if (currentLoc.startsWith(proxyPrefix)) {
 		// 浏览器会自动 decode pathname，但为了保险我们手动处理一下
 		// 这里提取出的就是 https://google.com/search?q=... 这种形式
-		return currentLoc.substring(proxyPrefix.length);
+		return decodeURIComponent(currentLoc.substring(proxyPrefix.length));
 	}
 	// 降级处理：如果找不到路径（比如刚加载时），使用传入的原始 Host
 	return 'https://${originalHost}/';
@@ -421,9 +421,30 @@ export default {
 
 				if (sessionBaseUrl) {
 					try {
-						// 如果 Cookie 存在，直接重定向回正确的代理路径
-						const fixedDest = new URL(url.pathname, sessionBaseUrl).href;
-						const fixedUrl = `${url.protocol}//${url.host}${secretPath}/${fixedDest}${url.search}${url.hash}`;
+						// 解析出原本应该访问的目标 URL
+						// 例如：把 /socket.io/ 拼接到 https://target.com/ 上
+						const fixedTargetUrlObj = new URL(url.pathname, sessionBaseUrl);
+						// 补上 search 参数 (?a=1)
+						fixedTargetUrlObj.search = url.search;
+
+						// 【新增修复】WebSocket 静默救援 (解决 302 导致 WS 断开的问题)
+						if (request.headers.get('Upgrade') === 'websocket') {
+							const targetUrlStr = fixedTargetUrlObj.href;
+
+							// 复用 WebSocket 转发逻辑
+							const wsHeaders = filterHeaders(request.headers, (name) => !name.startsWith("cf-"));
+							cleanHeaders(wsHeaders, fixedTargetUrlObj.hostname);
+
+							// 直接转发，不返回 302
+							return fetch(targetUrlStr, {
+								method: 'GET',
+								headers: wsHeaders,
+								redirect: 'manual'
+							});
+						}
+
+						// 普通 HTTP 请求仍然使用重定向救援
+						const fixedUrl = `${url.protocol}//${url.host}${secretPath}/${fixedTargetUrlObj.href}`;
 						return Response.redirect(fixedUrl, 302);
 					} catch (_e) { }
 				}
@@ -472,7 +493,7 @@ export default {
 			// 【新增】WebSocket 专用处理通道
 			if (request.headers.get("Upgrade") === "websocket") {
 				// 1. 构建 WebSocket 请求头
-				const wsHeaders = new Headers(request.headers);
+				const wsHeaders = filterHeaders(request.headers, (name) => !name.startsWith("cf-"));
 				cleanHeaders(wsHeaders, targetUrlObj.hostname); // 复用之前的清理函数
 
 				// 2. 直接转发，不做任何处理
